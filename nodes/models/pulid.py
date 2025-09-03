@@ -156,6 +156,8 @@ class NunchakuFluxPuLIDApplyV2:
         return (ret_model,)
 
 
+pipeline_cached = None
+
 class NunchakuPuLIDLoaderV2:
     """
     Node for loading the PuLID pipeline.
@@ -214,6 +216,12 @@ class NunchakuPuLIDLoaderV2:
         assert isinstance(model_wrapper, ComfyFluxWrapper)
         transformer = model_wrapper.model
 
+        global pipeline_cached
+
+        if pipeline_cached is not None:
+            pipeline_cached.transformer = transformer
+            return (model, pipeline_cached)
+
         device = comfy.model_management.get_torch_device()
         weight_dtype = next(transformer.parameters()).dtype
 
@@ -232,6 +240,9 @@ class NunchakuPuLIDLoaderV2:
             insightface_dirpath=insightface_dirpath,
             facexlib_dirpath=facexlib_dirpath,
         )
+
+        if pipeline_cached is None:
+            pipeline_cached = pulid_pipline
 
         return (model, pulid_pipline)
 
