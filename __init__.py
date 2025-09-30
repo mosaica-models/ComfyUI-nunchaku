@@ -23,7 +23,6 @@ if f"v{nunchaku_major_minor_patch_version}" not in supported_versions:
     logger.warning(
         f"ComfyUI-nunchaku {get_plugin_version()} is not compatible with nunchaku {nunchaku_full_version}. "
         f"Please update nunchaku to a supported version in {supported_versions}."
-        f"v1.0.0 currently is a nightly version. You can find the wheels at https://github.com/nunchaku-tech/nunchaku/releases/."
     )
 
 NODE_CLASS_MAPPINGS = {}
@@ -43,11 +42,12 @@ except ImportError:
     logger.exception("Node `NunchakuQwenImageDiTLoader` import failed:")
 
 try:
-    from .nodes.lora.flux import NunchakuFluxLoraLoader
+    from .nodes.lora.flux import NunchakuFluxLoraLoader, NunchakuFluxLoraStack
 
     NODE_CLASS_MAPPINGS["NunchakuFluxLoraLoader"] = NunchakuFluxLoraLoader
+    NODE_CLASS_MAPPINGS["NunchakuFluxLoraStack"] = NunchakuFluxLoraStack
 except ImportError:
-    logger.exception("Node `NunchakuFluxLoraLoader` import failed:")
+    logger.exception("Nodes `NunchakuFluxLoraLoader` and `NunchakuFluxLoraStack` import failed:")
 
 
 try:
