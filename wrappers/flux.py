@@ -4,6 +4,9 @@ enabling integration with ComfyUI forward,
 LoRA composition, and advanced caching strategies.
 """
 
+import gc
+import os
+from collections import OrderedDict
 from typing import Callable
 
 import torch
@@ -14,6 +17,7 @@ from torch import nn
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.caching.fbcache import cache_context, create_cache_context
 from nunchaku.lora.flux.compose import compose_lora
+from nunchaku.lora.flux.nunchaku_converter import to_nunchaku
 from nunchaku.utils import load_state_dict_in_safetensors
 
 
@@ -74,6 +78,12 @@ class ComfyFluxWrapper(nn.Module):
         self._prev_timestep = None  # for first-block cache
         self._cache_context = None
 
+        # Initialize composed LoRA cache on the model (shared across wrappers)
+        if not hasattr(model, "_comfy_composed_lora_cache"):
+            model._comfy_composed_lora_cache = OrderedDict()
+        if not hasattr(model, "_comfy_composed_lora_cache_max_size"):
+            model._comfy_composed_lora_cache_max_size = 0  # Default: cache disabled
+
     def process_img(self, x, index=0, h_offset=0, w_offset=0):
         """
         Preprocess an input image tensor for the model.
@@ -102,7 +112,9 @@ class ComfyFluxWrapper(nn.Module):
         patch_size = self.config.get("patch_size", 2)
         x = pad_to_patch_size(x, (patch_size, patch_size))
 
-        img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size)
+        img = rearrange(
+            x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size
+        )
         h_len = (h + (patch_size // 2)) // patch_size
         w_len = (w + (patch_size // 2)) // patch_size
 
@@ -191,7 +203,9 @@ class ComfyFluxWrapper(nn.Module):
                 else:
                     h_offset = h
 
-                kontext, kontext_ids = self.process_img(ref, index=1, h_offset=h_offset, w_offset=w_offset)
+                kontext, kontext_ids = self.process_img(
+                    ref, index=1, h_offset=h_offset, w_offset=w_offset
+                )
                 img = torch.cat([img, kontext], dim=1)
                 img_ids = torch.cat([img_ids, kontext_ids], dim=1)
                 h = max(h, ref.shape[-2] + h_offset)
@@ -199,51 +213,180 @@ class ComfyFluxWrapper(nn.Module):
 
         txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
 
-        # load and compose LoRA
+        # Initialize LoRA tracking lists if they don't exist
+        if not hasattr(model, 'comfy_lora_meta_list'):
+            model.comfy_lora_meta_list = []
+        if not hasattr(model, 'comfy_lora_sd_list'):
+            model.comfy_lora_sd_list = []
+
+        # load and compose LoRA with caching
         if self.loras != model.comfy_lora_meta_list:
-            lora_to_be_composed = []
-            for _ in range(max(0, len(model.comfy_lora_meta_list) - len(self.loras))):
-                model.comfy_lora_meta_list.pop()
-                model.comfy_lora_sd_list.pop()
-            for i in range(len(self.loras)):
-                meta = self.loras[i]
-                if i >= len(model.comfy_lora_meta_list):
-                    sd = load_state_dict_in_safetensors(meta[0])
-                    model.comfy_lora_meta_list.append(meta)
-                    model.comfy_lora_sd_list.append(sd)
-                elif model.comfy_lora_meta_list[i] != meta:
-                    if meta[0] != model.comfy_lora_meta_list[i][0]:
+            # Create cache key from LoRA paths and strengths
+            cache_key = (
+                tuple((path, strength) for path, strength in self.loras)
+                if self.loras
+                else None
+            )
+
+            # Check if caching is enabled (max_size > 0) and this exact composition is cached
+            composed_lora_nunchaku = None
+            cache_enabled = model._comfy_composed_lora_cache_max_size > 0
+            if cache_enabled and cache_key and cache_key in model._comfy_composed_lora_cache:
+                # Cache hit - reuse composed LoRA
+                print(f"[LoRA Cache] Cache HIT! Reusing composed LoRA for:")
+                for i, (path, strength) in enumerate(cache_key, 1):
+                    lora_name = os.path.basename(path)
+                    print(f"  [{i}] {lora_name} @ strength={strength}")
+                print(
+                    f"[LoRA Cache] Cache size: {len(model._comfy_composed_lora_cache)}/{model._comfy_composed_lora_cache_max_size}"
+                )
+                composed_lora_nunchaku = model._comfy_composed_lora_cache[cache_key]
+                # Move to end (most recently used)
+                model._comfy_composed_lora_cache.move_to_end(cache_key)
+
+                # Update sd_list to match meta_list (keep them in sync)
+                # When cache hit, we skip loading state_dicts, but we still need to
+                # maintain the lists so future cache misses don't crash
+                for _ in range(max(0, len(model.comfy_lora_meta_list) - len(self.loras))):
+                    model.comfy_lora_meta_list.pop()
+                    model.comfy_lora_sd_list.pop()
+                for i in range(len(self.loras)):
+                    meta = self.loras[i]
+                    if i >= len(model.comfy_lora_meta_list):
+                        # Load state dict for future cache misses
                         sd = load_state_dict_in_safetensors(meta[0])
-                        model.comfy_lora_sd_list[i] = sd
-                    model.comfy_lora_meta_list[i] = meta
-                lora_to_be_composed.append(({k: v for k, v in model.comfy_lora_sd_list[i].items()}, meta[1]))
+                        model.comfy_lora_meta_list.append(meta)
+                        model.comfy_lora_sd_list.append(sd)
+                    elif model.comfy_lora_meta_list[i] != meta:
+                        if meta[0] != model.comfy_lora_meta_list[i][0]:
+                            # File path changed, reload state dict
+                            sd = load_state_dict_in_safetensors(meta[0])
+                            model.comfy_lora_sd_list[i] = sd
+                        model.comfy_lora_meta_list[i] = meta
+            else:
+                # Cache miss or caching disabled - need to compose
+                if cache_enabled:
+                    print(f"[LoRA Cache] Cache MISS. Composing LoRA for:")
+                else:
+                    print(f"[LoRA Cache] Cache DISABLED. Composing LoRA for:")
+                if cache_key:
+                    for i, (path, strength) in enumerate(cache_key, 1):
+                        lora_name = os.path.basename(path)
+                        print(f"  [{i}] {lora_name} @ strength={strength}")
+                lora_to_be_composed = []
+                for _ in range(
+                    max(0, len(model.comfy_lora_meta_list) - len(self.loras))
+                ):
+                    model.comfy_lora_meta_list.pop()
+                    model.comfy_lora_sd_list.pop()
+                for i in range(len(self.loras)):
+                    meta = self.loras[i]
+                    if i >= len(model.comfy_lora_meta_list):
+                        sd = load_state_dict_in_safetensors(meta[0])
+                        model.comfy_lora_meta_list.append(meta)
+                        model.comfy_lora_sd_list.append(sd)
+                    elif model.comfy_lora_meta_list[i] != meta:
+                        if meta[0] != model.comfy_lora_meta_list[i][0]:
+                            sd = load_state_dict_in_safetensors(meta[0])
+                            model.comfy_lora_sd_list[i] = sd
+                        model.comfy_lora_meta_list[i] = meta
+                    lora_to_be_composed.append(
+                        (
+                            {k: v for k, v in model.comfy_lora_sd_list[i].items()},
+                            meta[1],
+                        )
+                    )
 
-            composed_lora = compose_lora(lora_to_be_composed)
+                # Compose LoRA in diffusers format
+                composed_lora = compose_lora(lora_to_be_composed)
 
-            if len(composed_lora) == 0:
+                # Convert to nunchaku format and cache it
+                if len(composed_lora) > 0:
+                    composed_lora_nunchaku_cpu = to_nunchaku(
+                        composed_lora, base_sd=model._quantized_part_sd
+                    )
+
+                    # Move tensors to GPU for caching (avoid CPU->GPU transfer on cache hits)
+                    device = next(model.parameters()).device
+                    composed_lora_nunchaku = {
+                        k: v.to(device) for k, v in composed_lora_nunchaku_cpu.items()
+                    }
+
+                    # Add to cache (GPU tensors) only if caching is enabled
+                    if cache_enabled and cache_key:
+                        # Enforce max cache size (LRU eviction) BEFORE adding new entry
+                        evicted_count = 0
+                        while (
+                            len(model._comfy_composed_lora_cache)
+                            >= model._comfy_composed_lora_cache_max_size
+                        ):
+                            evicted_key, evicted_lora = model._comfy_composed_lora_cache.popitem(
+                                last=False
+                            )
+                            # Explicitly free GPU memory for evicted LoRA
+                            if evicted_lora is not None:
+                                for tensor in evicted_lora.values():
+                                    if isinstance(tensor, torch.Tensor):
+                                        del tensor
+                                del evicted_lora
+                            evicted_count += 1
+
+                        if evicted_count > 0:
+                            # Trigger garbage collection to free GPU memory immediately
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                            # Force synchronization to ensure memory is freed
+                            torch.cuda.synchronize()
+                            print(
+                                f"[LoRA Cache] Evicted {evicted_count} old entry/entries (LRU) and freed GPU memory"
+                            )
+
+                        # Now add the new entry after ensuring space
+                        model._comfy_composed_lora_cache[cache_key] = (
+                            composed_lora_nunchaku
+                        )
+                        print(
+                            f"[LoRA Cache] Cached new composition on GPU ({device}). Cache size: {len(model._comfy_composed_lora_cache)}/{model._comfy_composed_lora_cache_max_size}"
+                        )
+
+            # Apply the composed LoRA (from cache or freshly composed)
+            if composed_lora_nunchaku is None or len(composed_lora_nunchaku) == 0:
                 model.reset_lora()
             else:
-                if "x_embedder.lora_A.weight" in composed_lora:
-                    new_in_channels = composed_lora["x_embedder.lora_A.weight"].shape[1]
+                if "x_embedder.lora_A.weight" in composed_lora_nunchaku:
+                    new_in_channels = composed_lora_nunchaku[
+                        "x_embedder.lora_A.weight"
+                    ].shape[1]
                     current_in_channels = model.x_embedder.in_features
                     if new_in_channels < current_in_channels:
                         model.reset_x_embedder()
-                model.update_lora_params(composed_lora)
+                model.update_lora_params(composed_lora_nunchaku)
 
-        controlnet_block_samples = None if control is None else [y.to(x.dtype) for y in control["input"]]
-        controlnet_single_block_samples = None if control is None else [y.to(x.dtype) for y in control["output"]]
+            # Update the meta list so next forward pass doesn't reload
+            model.comfy_lora_meta_list = list(self.loras)
+
+        controlnet_block_samples = (
+            None if control is None else [y.to(x.dtype) for y in control["input"]]
+        )
+        controlnet_single_block_samples = (
+            None if control is None else [y.to(x.dtype) for y in control["output"]]
+        )
 
         if self.pulid_pipeline is not None:
             self.model.transformer_blocks[0].pulid_ca = self.pulid_pipeline.pulid_ca
 
-        if getattr(model, "residual_diff_threshold_multi", 0) != 0 or getattr(model, "_is_cached", False):
+        if getattr(model, "residual_diff_threshold_multi", 0) != 0 or getattr(
+            model, "_is_cached", False
+        ):
             # A more robust caching strategy
             cache_invalid = False
 
             # Check if timestamps have changed or are out of valid range
             if self._prev_timestep is None:
                 cache_invalid = True
-            elif self._prev_timestep < timestep_float + 1e-5:  # allow a small tolerance to reuse the cache
+            elif (
+                self._prev_timestep < timestep_float + 1e-5
+            ):  # allow a small tolerance to reuse the cache
                 cache_invalid = True
 
             if cache_invalid:
