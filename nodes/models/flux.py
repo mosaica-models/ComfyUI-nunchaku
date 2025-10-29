@@ -182,10 +182,20 @@ class NunchakuFluxDiTLoader:
                         "min": 0,
                         "max": 20,
                         "step": 1,
-                        "tooltip": "Maximum number of composed LoRAs to cache in GPU memory. "
+                        "tooltip": "Maximum number of composed LoRAs to cache. "
                         "Higher values allow faster switching between more LoRA combinations "
-                        "but use more VRAM. Set to 0 to disable caching (always recompose). "
+                        "but use more memory (VRAM if lora_cache_gpu=true, RAM if false). "
+                        "Set to 0 to disable caching (always recompose). "
                         "Recommended: 5-10 for frequent LoRA switching.",
+                    },
+                ),
+                "lora_cache_gpu": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Whether to cache composed LoRAs on GPU (VRAM) or CPU (RAM). "
+                        "GPU caching is faster but uses more VRAM. "
+                        "CPU caching saves VRAM but requires GPU transfer on cache hits.",
                     },
                 ),
                 "i2f_mode": (
@@ -213,6 +223,7 @@ class NunchakuFluxDiTLoader:
         device_id: int,
         data_type: str,
         lora_cache_size: int = 0,
+        lora_cache_gpu: bool = False,
         **kwargs,
     ):
         """
@@ -233,7 +244,9 @@ class NunchakuFluxDiTLoader:
         data_type : str
             Data type for inference ("bfloat16" or "float16").
         lora_cache_size : int, optional
-            Maximum number of composed LoRAs to cache in GPU memory (0 to disable). Default: 0.
+            Maximum number of composed LoRAs to cache (0 to disable). Default: 0.
+        lora_cache_gpu : bool, optional
+            Whether to cache composed LoRAs on GPU (True) or CPU (False). Default: False.
         **kwargs
             Additional keyword arguments (includes i2f_mode).
 
@@ -342,11 +355,9 @@ class NunchakuFluxDiTLoader:
         model_config.custom_operations = None
         model = model_config.get_model({})
 
-        # Set LoRA cache size on transformer before wrapping
-        if not hasattr(transformer, '_comfy_composed_lora_cache_max_size'):
-            transformer._comfy_composed_lora_cache_max_size = lora_cache_size
-        else:
-            transformer._comfy_composed_lora_cache_max_size = lora_cache_size
+        # Set LoRA cache size and GPU preference on transformer before wrapping
+        transformer._comfy_composed_lora_cache_max_size = lora_cache_size
+        transformer._comfy_lora_cache_gpu = lora_cache_gpu
 
         model.diffusion_model = ComfyFluxWrapper(transformer, config=comfy_config["model_config"])
         model = comfy.model_patcher.ModelPatcher(model, device, device_id)

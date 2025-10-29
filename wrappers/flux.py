@@ -83,6 +83,8 @@ class ComfyFluxWrapper(nn.Module):
             model._comfy_composed_lora_cache = OrderedDict()
         if not hasattr(model, "_comfy_composed_lora_cache_max_size"):
             model._comfy_composed_lora_cache_max_size = 0  # Default: cache disabled
+        if not hasattr(model, "_comfy_lora_cache_gpu"):
+            model._comfy_lora_cache_gpu = False  # Default: cache on CPU
 
     def process_img(self, x, index=0, h_offset=0, w_offset=0):
         """
@@ -233,14 +235,29 @@ class ComfyFluxWrapper(nn.Module):
             cache_enabled = model._comfy_composed_lora_cache_max_size > 0
             if cache_enabled and cache_key and cache_key in model._comfy_composed_lora_cache:
                 # Cache hit - reuse composed LoRA
-                print(f"[LoRA Cache] Cache HIT! Reusing composed LoRA for:")
+                cached_lora = model._comfy_composed_lora_cache[cache_key]
+                
+                # Determine cache location by inspecting cached tensors
+                first_tensor = next(iter(cached_lora.values()))
+                cache_location = "GPU" if first_tensor.device.type == "cuda" else "CPU"
+                
+                print(f"[LoRA Cache] Cache HIT ({cache_location})! Reusing composed LoRA for:")
                 for i, (path, strength) in enumerate(cache_key, 1):
                     lora_name = os.path.basename(path)
                     print(f"  [{i}] {lora_name} @ strength={strength}")
                 print(
                     f"[LoRA Cache] Cache size: {len(model._comfy_composed_lora_cache)}/{model._comfy_composed_lora_cache_max_size}"
                 )
-                composed_lora_nunchaku = model._comfy_composed_lora_cache[cache_key]
+                
+                # If cached on CPU, need to move to GPU for use
+                device = next(model.parameters()).device
+                if first_tensor.device != device:
+                    composed_lora_nunchaku = {
+                        k: v.to(device) for k, v in cached_lora.items()
+                    }
+                else:
+                    composed_lora_nunchaku = cached_lora
+                
                 # Move to end (most recently used)
                 model._comfy_composed_lora_cache.move_to_end(cache_key)
 
@@ -306,13 +323,20 @@ class ComfyFluxWrapper(nn.Module):
                         composed_lora, base_sd=model._quantized_part_sd
                     )
 
-                    # Move tensors to GPU for caching (avoid CPU->GPU transfer on cache hits)
+                    # Determine cache location and prepare tensors accordingly
                     device = next(model.parameters()).device
-                    composed_lora_nunchaku = {
-                        k: v.to(device) for k, v in composed_lora_nunchaku_cpu.items()
-                    }
+                    if model._comfy_lora_cache_gpu:
+                        # GPU caching - move tensors to GPU now (faster cache hits, uses VRAM)
+                        composed_lora_nunchaku = {
+                            k: v.to(device) for k, v in composed_lora_nunchaku_cpu.items()
+                        }
+                        cache_device_for_storage = device
+                    else:
+                        # CPU caching - keep on CPU (saves VRAM, requires transfer on cache hits)
+                        composed_lora_nunchaku = composed_lora_nunchaku_cpu
+                        cache_device_for_storage = torch.device("cpu")
 
-                    # Add to cache (GPU tensors) only if caching is enabled
+                    # Add to cache only if caching is enabled
                     if cache_enabled and cache_key:
                         # Enforce max cache size (LRU eviction) BEFORE adding new entry
                         evicted_count = 0
@@ -345,22 +369,30 @@ class ComfyFluxWrapper(nn.Module):
                         model._comfy_composed_lora_cache[cache_key] = (
                             composed_lora_nunchaku
                         )
+                        cache_location = "GPU" if model._comfy_lora_cache_gpu else "CPU"
                         print(
-                            f"[LoRA Cache] Cached new composition on GPU ({device}). Cache size: {len(model._comfy_composed_lora_cache)}/{model._comfy_composed_lora_cache_max_size}"
+                            f"[LoRA Cache] Cached new composition on {cache_location} ({cache_device_for_storage}). Cache size: {len(model._comfy_composed_lora_cache)}/{model._comfy_composed_lora_cache_max_size}"
                         )
 
             # Apply the composed LoRA (from cache or freshly composed)
             if composed_lora_nunchaku is None or len(composed_lora_nunchaku) == 0:
                 model.reset_lora()
             else:
-                if "x_embedder.lora_A.weight" in composed_lora_nunchaku:
-                    new_in_channels = composed_lora_nunchaku[
+                # Ensure tensors are on GPU for application (may already be on GPU)
+                device = next(model.parameters()).device
+                composed_lora_nunchaku_gpu = {
+                    k: v.to(device) if v.device != device else v
+                    for k, v in composed_lora_nunchaku.items()
+                }
+                
+                if "x_embedder.lora_A.weight" in composed_lora_nunchaku_gpu:
+                    new_in_channels = composed_lora_nunchaku_gpu[
                         "x_embedder.lora_A.weight"
                     ].shape[1]
                     current_in_channels = model.x_embedder.in_features
                     if new_in_channels < current_in_channels:
                         model.reset_x_embedder()
-                model.update_lora_params(composed_lora_nunchaku)
+                model.update_lora_params(composed_lora_nunchaku_gpu)
 
             # Update the meta list so next forward pass doesn't reload
             model.comfy_lora_meta_list = list(self.loras)
