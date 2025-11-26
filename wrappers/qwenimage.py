@@ -12,8 +12,15 @@ from torch import nn
 
 from nunchaku import NunchakuQwenImageTransformer2DModel
 from nunchaku.caching.fbcache import cache_context, create_cache_context
-from nunchaku.lora.qwenimage.compose import compose_lora
 from nunchaku.utils import load_state_dict_in_safetensors
+
+# Try to import LoRA functions, but make them optional
+try:
+    from nunchaku.lora.qwenimage.compose import compose_lora
+    LORA_AVAILABLE = True
+except ImportError:
+    LORA_AVAILABLE = False
+    compose_lora = None
 
 
 class ComfyQwenImageWrapper(nn.Module):
@@ -193,10 +200,20 @@ class ComfyQwenImageWrapper(nn.Module):
 
         # load and compose LoRA
         if self.loras != model.comfy_lora_meta_list:
-            from nunchaku.lora.qwenimage import is_nunchaku_format
+            if not LORA_AVAILABLE:
+                if len(self.loras) > 0:
+                    raise ImportError(
+                        "LoRA support for QwenImage requires the nunchaku.lora.qwenimage module, "
+                        "which is not available in the current nunchaku package. "
+                        "Please update the nunchaku package to a version that includes QwenImage LoRA support."
+                    )
+                # If no LoRAs requested, just continue
+                pass
+            else:
+                from nunchaku.lora.qwenimage import is_nunchaku_format
 
-            lora_to_be_composed = []
-            nunchaku_lora_count = 0
+                lora_to_be_composed = []
+                nunchaku_lora_count = 0
 
             for _ in range(max(0, len(model.comfy_lora_meta_list) - len(self.loras))):
                 model.comfy_lora_meta_list.pop()
