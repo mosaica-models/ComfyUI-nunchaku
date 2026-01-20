@@ -3,7 +3,6 @@ This module provides the :class:`NunchakuQwenImageLoraLoader` node
 for applying LoRA weights to Nunchaku Qwen Image models within ComfyUI.
 """
 
-import copy
 import logging
 import os
 
@@ -136,9 +135,9 @@ class NunchakuQwenImageLoraLoader:
 
         transformer = model_wrapper.model
 
-        # Flux-style deepcopy: temporarily remove transformer to avoid copying it
+        # Flux-style clone: temporarily remove transformer to avoid copying it
         model_wrapper.model = None
-        ret_model = copy.deepcopy(model)  # copy everything except the model
+        ret_model = model.clone()  # copy everything except the model
         ret_model_wrapper = ret_model.model.diffusion_model
 
         if not isinstance(ret_model_wrapper, ComfyQwenImageWrapper):
@@ -295,9 +294,9 @@ class NunchakuQwenImageLoraStack:
 
         transformer = model_wrapper.model
 
-        # Flux-style deepcopy: temporarily remove transformer to avoid copying it
+        # Flux-style clone: temporarily remove transformer to avoid copying it
         model_wrapper.model = None
-        ret_model = copy.deepcopy(model)  # copy everything except the model
+        ret_model = model.clone()  # copy everything except the model
         ret_model_wrapper = ret_model.model.diffusion_model
 
         if not isinstance(ret_model_wrapper, ComfyQwenImageWrapper):
