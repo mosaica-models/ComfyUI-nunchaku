@@ -122,10 +122,13 @@ class NunchakuFluxLoraLoader:
         ret_model = model.clone()
         model_wrapper.model = transformer
 
-        # Shallow copy inner model so we can set diffusion_model without affecting original
-        ret_model.model = copy.copy(ret_model.model)
-        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
-        ret_model.model.diffusion_model.loras = new_loras
+        # Create a new inner model object that doesn't share diffusion_model with original
+        original_inner = ret_model.model
+        new_inner = object.__new__(original_inner.__class__)
+        new_inner.__dict__.update(original_inner.__dict__)
+        new_inner.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
+        new_inner.diffusion_model.loras = new_loras
+        ret_model.model = new_inner
 
         # Handle FLUX.1 tools LoRAs that change input channels
         sd = to_diffusers(lora_path)
@@ -270,10 +273,13 @@ class NunchakuFluxLoraStack:
         ret_model = model.clone()
         model_wrapper.model = transformer
 
-        # Shallow copy inner model so we can set diffusion_model without affecting original
-        ret_model.model = copy.copy(ret_model.model)
-        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
-        ret_model.model.diffusion_model.loras = loras_to_apply
+        # Create a new inner model object that doesn't share diffusion_model with original
+        original_inner = ret_model.model
+        new_inner = object.__new__(original_inner.__class__)
+        new_inner.__dict__.update(original_inner.__dict__)
+        new_inner.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
+        new_inner.diffusion_model.loras = loras_to_apply
+        ret_model.model = new_inner
 
         if max_in_channels > ret_model.model.model_config.unet_config["in_channels"]:
             ret_model.model.model_config.unet_config["in_channels"] = max_in_channels
