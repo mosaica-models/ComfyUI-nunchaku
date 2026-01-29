@@ -118,10 +118,13 @@ class NunchakuFluxLoraLoader:
 
         # Inject loras into transformer_options at forward time
         def inject_loras(model_function, params):
+            params = dict(params)  # Copy to avoid modifying original
             if 'transformer_options' not in params:
                 params['transformer_options'] = {}
             params['transformer_options']['nunchaku_loras'] = new_loras
-            return model_function(params['input'], params['timestep'], **params)
+            x = params.pop('input')
+            t = params.pop('timestep')
+            return model_function(x, t, **params)
 
         ret_model.set_model_unet_function_wrapper(inject_loras)
 
@@ -265,10 +268,13 @@ class NunchakuFluxLoraStack:
 
         # Inject loras into transformer_options at forward time
         def inject_loras(model_function, params):
+            params = dict(params)  # Copy to avoid modifying original
             if 'transformer_options' not in params:
                 params['transformer_options'] = {}
             params['transformer_options']['nunchaku_loras'] = loras_to_apply
-            return model_function(params['input'], params['timestep'], **params)
+            x = params.pop('input')
+            t = params.pop('timestep')
+            return model_function(x, t, **params)
 
         ret_model.set_model_unet_function_wrapper(inject_loras)
 
