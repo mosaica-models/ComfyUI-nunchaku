@@ -221,15 +221,12 @@ class ComfyFluxWrapper(nn.Module):
         if not hasattr(model, 'comfy_lora_sd_list'):
             model.comfy_lora_sd_list = []
 
-        # Get loras from transformer_options (injected by ModelPatcher) or fall back to self.loras
-        loras = transformer_options.get('nunchaku_loras', self.loras)
-
         # load and compose LoRA with caching
-        if loras != model.comfy_lora_meta_list:
+        if self.loras != model.comfy_lora_meta_list:
             # Create cache key from LoRA paths and strengths
             cache_key = (
-                tuple((path, strength) for path, strength in loras)
-                if loras
+                tuple((path, strength) for path, strength in self.loras)
+                if self.loras
                 else None
             )
 
@@ -267,11 +264,11 @@ class ComfyFluxWrapper(nn.Module):
                 # Update sd_list to match meta_list (keep them in sync)
                 # When cache hit, we skip loading state_dicts, but we still need to
                 # maintain the lists so future cache misses don't crash
-                for _ in range(max(0, len(model.comfy_lora_meta_list) - len(loras))):
+                for _ in range(max(0, len(model.comfy_lora_meta_list) - len(self.loras))):
                     model.comfy_lora_meta_list.pop()
                     model.comfy_lora_sd_list.pop()
-                for i in range(len(loras)):
-                    meta = loras[i]
+                for i in range(len(self.loras)):
+                    meta = self.loras[i]
                     if i >= len(model.comfy_lora_meta_list):
                         # Load state dict for future cache misses
                         sd = load_state_dict_in_safetensors(meta[0])
@@ -295,12 +292,12 @@ class ComfyFluxWrapper(nn.Module):
                         print(f"  [{i}] {lora_name} @ strength={strength}")
                 lora_to_be_composed = []
                 for _ in range(
-                    max(0, len(model.comfy_lora_meta_list) - len(loras))
+                    max(0, len(model.comfy_lora_meta_list) - len(self.loras))
                 ):
                     model.comfy_lora_meta_list.pop()
                     model.comfy_lora_sd_list.pop()
-                for i in range(len(loras)):
-                    meta = loras[i]
+                for i in range(len(self.loras)):
+                    meta = self.loras[i]
                     if i >= len(model.comfy_lora_meta_list):
                         sd = load_state_dict_in_safetensors(meta[0])
                         model.comfy_lora_meta_list.append(meta)
@@ -398,7 +395,7 @@ class ComfyFluxWrapper(nn.Module):
                 model.update_lora_params(composed_lora_nunchaku_gpu)
 
             # Update the meta list so next forward pass doesn't reload
-            model.comfy_lora_meta_list = list(loras)
+            model.comfy_lora_meta_list = list(self.loras)
 
         controlnet_block_samples = (
             None if control is None else [y.to(x.dtype) for y in control["input"]]

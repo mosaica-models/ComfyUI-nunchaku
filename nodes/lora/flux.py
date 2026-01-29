@@ -6,9 +6,13 @@ for applying LoRA weights to Nunchaku FLUX models within ComfyUI.
 import logging
 import os
 
+import copy
+
 import folder_paths
 
 from nunchaku.lora.flux import to_diffusers
+
+from ...wrappers.flux import ComfyFluxWrapper
 
 # Get log level from environment variable (default to INFO)
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -107,26 +111,21 @@ class NunchakuFluxLoraLoader:
         if abs(lora_strength) < 1e-5:
             return (model,)
 
+        model_wrapper = model.model.diffusion_model
+        assert isinstance(model_wrapper, ComfyFluxWrapper)
+
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        new_loras = list(model_wrapper.loras) + [(lora_path, lora_strength)]
 
-        # Build loras list (stored on ModelPatcher, which clones properly)
-        existing_loras = getattr(model, '_nunchaku_loras', [])
-        new_loras = list(existing_loras) + [(lora_path, lora_strength)]
-
+        transformer = model_wrapper.model
+        model_wrapper.model = None
         ret_model = model.clone()
-        ret_model._nunchaku_loras = new_loras
+        model_wrapper.model = transformer
 
-        # Inject loras into transformer_options at forward time
-        def inject_loras(model_function, params):
-            params = dict(params)  # Copy to avoid modifying original
-            if 'transformer_options' not in params:
-                params['transformer_options'] = {}
-            params['transformer_options']['nunchaku_loras'] = new_loras
-            x = params.pop('input')
-            t = params.pop('timestep')
-            return model_function(x, t, **params)
-
-        ret_model.set_model_unet_function_wrapper(inject_loras)
+        # Shallow copy inner model so we can set diffusion_model without affecting original
+        ret_model.model = copy.copy(ret_model.model)
+        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
+        ret_model.model.diffusion_model.loras = new_loras
 
         # Handle FLUX.1 tools LoRAs that change input channels
         sd = to_diffusers(lora_path)
@@ -263,20 +262,18 @@ class NunchakuFluxLoraStack:
         if not loras_to_apply:
             return (model,)
 
+        model_wrapper = model.model.diffusion_model
+        assert isinstance(model_wrapper, ComfyFluxWrapper)
+
+        transformer = model_wrapper.model
+        model_wrapper.model = None
         ret_model = model.clone()
-        ret_model._nunchaku_loras = loras_to_apply
+        model_wrapper.model = transformer
 
-        # Inject loras into transformer_options at forward time
-        def inject_loras(model_function, params):
-            params = dict(params)  # Copy to avoid modifying original
-            if 'transformer_options' not in params:
-                params['transformer_options'] = {}
-            params['transformer_options']['nunchaku_loras'] = loras_to_apply
-            x = params.pop('input')
-            t = params.pop('timestep')
-            return model_function(x, t, **params)
-
-        ret_model.set_model_unet_function_wrapper(inject_loras)
+        # Shallow copy inner model so we can set diffusion_model without affecting original
+        ret_model.model = copy.copy(ret_model.model)
+        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
+        ret_model.model.diffusion_model.loras = loras_to_apply
 
         if max_in_channels > ret_model.model.model_config.unet_config["in_channels"]:
             ret_model.model.model_config.unet_config["in_channels"] = max_in_channels
