@@ -121,8 +121,10 @@ class NunchakuFluxLoraLoader:
         model_wrapper.model = transformer
         ret_model_wrapper.model = transformer
 
+        # Create a new list to avoid sharing the list object with the original wrapper
+        # (model.clone() does a shallow copy, so loras list would be shared)
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        ret_model_wrapper.loras.append((lora_path, lora_strength))
+        ret_model_wrapper.loras = list(model_wrapper.loras) + [(lora_path, lora_strength)]
 
         sd = to_diffusers(lora_path)
 
