@@ -114,17 +114,13 @@ class NunchakuFluxLoraLoader:
 
         transformer = model_wrapper.model
         model_wrapper.model = None
-        ret_model = model.clone()  # copy everything except the model
-        ret_model_wrapper = ret_model.model.diffusion_model
-        assert isinstance(ret_model_wrapper, ComfyFluxWrapper)
-
+        ret_model = model.clone()
         model_wrapper.model = transformer
-        ret_model_wrapper.model = transformer
 
-        # Create a new list to avoid sharing the list object with the original wrapper
-        # (model.clone() does a shallow copy, so loras list would be shared)
+        # Create new wrapper with updated loras (clone shares the wrapper object)
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        ret_model_wrapper.loras = list(model_wrapper.loras) + [(lora_path, lora_strength)]
+        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
+        ret_model.model.diffusion_model.loras = list(model_wrapper.loras) + [(lora_path, lora_strength)]
 
         sd = to_diffusers(lora_path)
 
@@ -261,15 +257,11 @@ class NunchakuFluxLoraStack:
 
         transformer = model_wrapper.model
         model_wrapper.model = None
-        ret_model = model.clone()  # copy everything except the model
-        ret_model_wrapper = ret_model.model.diffusion_model
-        assert isinstance(ret_model_wrapper, ComfyFluxWrapper)
-
+        ret_model = model.clone()
         model_wrapper.model = transformer
-        ret_model_wrapper.model = transformer
 
-        # Clear existing LoRA list
-        ret_model_wrapper.loras = []
+        # Create new wrapper (clone shares the wrapper object)
+        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
 
         # Track the maximum input channels needed
         max_in_channels = ret_model.model.model_config.unet_config["in_channels"]
@@ -277,7 +269,7 @@ class NunchakuFluxLoraStack:
         # Add all LoRAs
         for lora_name, lora_strength in loras_to_apply:
             lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-            ret_model_wrapper.loras.append((lora_path, lora_strength))
+            ret_model.model.diffusion_model.loras.append((lora_path, lora_strength))
 
             # Check if input channels need to be updated
             sd = to_diffusers(lora_path)

@@ -138,16 +138,19 @@ class NunchakuQwenImageLoraLoader:
         # Flux-style clone: temporarily remove transformer to avoid copying it
         model_wrapper.model = None
         ret_model = model.clone()  # copy everything except the model
-        ret_model_wrapper = ret_model.model.diffusion_model
-
-        if not isinstance(ret_model_wrapper, ComfyQwenImageWrapper):
-            raise TypeError(f"Model wrapper type changed after deepcopy: {type(ret_model_wrapper).__name__}")
-
         model_wrapper.model = transformer
-        ret_model_wrapper.model = transformer  # Share the same transformer
 
+        # Create a NEW wrapper for the cloned model to avoid sharing state with the original
+        # (model.clone() does a shallow copy, so the wrapper object would be shared)
+        ret_model_wrapper = ComfyQwenImageWrapper(
+            transformer,
+            config=model_wrapper.config,
+            customized_forward=model_wrapper.customized_forward,
+            forward_kwargs=model_wrapper.forward_kwargs,
+        )
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        ret_model_wrapper.loras.append((lora_path, lora_strength))
+        ret_model_wrapper.loras = list(model_wrapper.loras) + [(lora_path, lora_strength)]
+        ret_model.model.diffusion_model = ret_model_wrapper
 
         logger.info(f"LoRA added: {lora_name} (strength={lora_strength})")
         logger.debug(f"Total LoRAs: {len(ret_model_wrapper.loras)}")
