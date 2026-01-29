@@ -118,6 +118,8 @@ class NunchakuFluxLoraLoader:
 
         # Inject loras into transformer_options at forward time
         def inject_loras(model_function, params):
+            if 'transformer_options' not in params:
+                params['transformer_options'] = {}
             params['transformer_options']['nunchaku_loras'] = new_loras
             return model_function(params['input'], params['timestep'], **params)
 
@@ -263,6 +265,8 @@ class NunchakuFluxLoraStack:
 
         # Inject loras into transformer_options at forward time
         def inject_loras(model_function, params):
+            if 'transformer_options' not in params:
+                params['transformer_options'] = {}
             params['transformer_options']['nunchaku_loras'] = loras_to_apply
             return model_function(params['input'], params['timestep'], **params)
 
