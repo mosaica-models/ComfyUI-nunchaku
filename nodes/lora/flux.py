@@ -6,13 +6,9 @@ for applying LoRA weights to Nunchaku FLUX models within ComfyUI.
 import logging
 import os
 
-import copy
-
 import folder_paths
 
 from nunchaku.lora.flux import to_diffusers
-
-from ...wrappers.flux import ComfyFluxWrapper
 
 # Get log level from environment variable (default to INFO)
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -111,24 +107,18 @@ class NunchakuFluxLoraLoader:
         if abs(lora_strength) < 1e-5:
             return (model,)
 
-        model_wrapper = model.model.diffusion_model
-        assert isinstance(model_wrapper, ComfyFluxWrapper)
-
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        new_loras = list(model_wrapper.loras) + [(lora_path, lora_strength)]
 
-        transformer = model_wrapper.model
-        model_wrapper.model = None
+        # Get existing loras from transformer_options in model_options
+        existing_opts = model.model_options.get('transformer_options', {})
+        existing_loras = existing_opts.get('nunchaku_loras', [])
+        new_loras = list(existing_loras) + [(lora_path, lora_strength)]
+
         ret_model = model.clone()
-        model_wrapper.model = transformer
-
-        # Create a new inner model object that doesn't share diffusion_model with original
-        original_inner = ret_model.model
-        new_inner = object.__new__(original_inner.__class__)
-        new_inner.__dict__.update(original_inner.__dict__)
-        new_inner.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
-        new_inner.diffusion_model.loras = new_loras
-        ret_model.model = new_inner
+        # Create a NEW transformer_options dict to avoid modifying the original (clone may shallow copy)
+        new_transformer_options = dict(ret_model.model_options.get('transformer_options', {}))
+        new_transformer_options['nunchaku_loras'] = new_loras
+        ret_model.model_options['transformer_options'] = new_transformer_options
 
         # Handle FLUX.1 tools LoRAs that change input channels
         sd = to_diffusers(lora_path)
@@ -265,21 +255,11 @@ class NunchakuFluxLoraStack:
         if not loras_to_apply:
             return (model,)
 
-        model_wrapper = model.model.diffusion_model
-        assert isinstance(model_wrapper, ComfyFluxWrapper)
-
-        transformer = model_wrapper.model
-        model_wrapper.model = None
         ret_model = model.clone()
-        model_wrapper.model = transformer
-
-        # Create a new inner model object that doesn't share diffusion_model with original
-        original_inner = ret_model.model
-        new_inner = object.__new__(original_inner.__class__)
-        new_inner.__dict__.update(original_inner.__dict__)
-        new_inner.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
-        new_inner.diffusion_model.loras = loras_to_apply
-        ret_model.model = new_inner
+        # Create a NEW transformer_options dict to avoid modifying the original (clone may shallow copy)
+        new_transformer_options = dict(ret_model.model_options.get('transformer_options', {}))
+        new_transformer_options['nunchaku_loras'] = loras_to_apply
+        ret_model.model_options['transformer_options'] = new_transformer_options
 
         if max_in_channels > ret_model.model.model_config.unet_config["in_channels"]:
             ret_model.model.model_config.unet_config["in_channels"] = max_in_channels
