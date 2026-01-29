@@ -10,8 +10,6 @@ import folder_paths
 
 from nunchaku.lora.flux import to_diffusers
 
-from ...wrappers.flux import ComfyFluxWrapper
-
 # Get log level from environment variable (default to INFO)
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -107,24 +105,26 @@ class NunchakuFluxLoraLoader:
             A tuple containing the modified diffusion model.
         """
         if abs(lora_strength) < 1e-5:
-            return (model,)  # If the strength is too small, return the original model
+            return (model,)
 
-        model_wrapper = model.model.diffusion_model
-        assert isinstance(model_wrapper, ComfyFluxWrapper)
-
-        transformer = model_wrapper.model
-        model_wrapper.model = None
-        ret_model = model.clone()
-        model_wrapper.model = transformer
-
-        # Create new wrapper with updated loras (clone shares the wrapper object)
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
-        ret_model.model.diffusion_model.loras = list(model_wrapper.loras) + [(lora_path, lora_strength)]
 
+        # Build loras list (stored on ModelPatcher, which clones properly)
+        existing_loras = getattr(model, '_nunchaku_loras', [])
+        new_loras = list(existing_loras) + [(lora_path, lora_strength)]
+
+        ret_model = model.clone()
+        ret_model._nunchaku_loras = new_loras
+
+        # Inject loras into transformer_options at forward time
+        def inject_loras(model_function, params):
+            params['transformer_options']['nunchaku_loras'] = new_loras
+            return model_function(params['input'], params['timestep'], **params)
+
+        ret_model.set_model_unet_function_wrapper(inject_loras)
+
+        # Handle FLUX.1 tools LoRAs that change input channels
         sd = to_diffusers(lora_path)
-
-        # To handle FLUX.1 tools LoRAs, which change the number of input channels
         if "transformer.x_embedder.lora_A.weight" in sd:
             new_in_channels = sd["transformer.x_embedder.lora_A.weight"].shape[1]
             assert new_in_channels % 4 == 0
@@ -233,43 +233,19 @@ class NunchakuFluxLoraStack:
         """
         # Collect LoRA information to apply
         loras_to_apply = []
+        max_in_channels = model.model.model_config.unet_config["in_channels"]
 
         for i in range(1, 16):  # Check all 15 LoRA slots
             lora_name = kwargs.get(f"lora_name_{i}")
             lora_strength = kwargs.get(f"lora_strength_{i}", 1.0)
 
-            # Skip unset or None LoRAs
             if lora_name is None or lora_name == "None" or lora_name == "":
                 continue
-
-            # Skip LoRAs with zero strength
             if abs(lora_strength) < 1e-5:
                 continue
 
-            loras_to_apply.append((lora_name, lora_strength))
-
-        # If no LoRAs need to be applied, return the original model
-        if not loras_to_apply:
-            return (model,)
-
-        model_wrapper = model.model.diffusion_model
-        assert isinstance(model_wrapper, ComfyFluxWrapper)
-
-        transformer = model_wrapper.model
-        model_wrapper.model = None
-        ret_model = model.clone()
-        model_wrapper.model = transformer
-
-        # Create new wrapper (clone shares the wrapper object)
-        ret_model.model.diffusion_model = ComfyFluxWrapper(transformer, model_wrapper.config)
-
-        # Track the maximum input channels needed
-        max_in_channels = ret_model.model.model_config.unet_config["in_channels"]
-
-        # Add all LoRAs
-        for lora_name, lora_strength in loras_to_apply:
             lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
-            ret_model.model.diffusion_model.loras.append((lora_path, lora_strength))
+            loras_to_apply.append((lora_path, lora_strength))
 
             # Check if input channels need to be updated
             sd = to_diffusers(lora_path)
@@ -279,7 +255,19 @@ class NunchakuFluxLoraStack:
                 new_in_channels = new_in_channels // 4
                 max_in_channels = max(max_in_channels, new_in_channels)
 
-        # Update the model's input channels
+        if not loras_to_apply:
+            return (model,)
+
+        ret_model = model.clone()
+        ret_model._nunchaku_loras = loras_to_apply
+
+        # Inject loras into transformer_options at forward time
+        def inject_loras(model_function, params):
+            params['transformer_options']['nunchaku_loras'] = loras_to_apply
+            return model_function(params['input'], params['timestep'], **params)
+
+        ret_model.set_model_unet_function_wrapper(inject_loras)
+
         if max_in_channels > ret_model.model.model_config.unet_config["in_channels"]:
             ret_model.model.model_config.unet_config["in_channels"] = max_in_channels
 
